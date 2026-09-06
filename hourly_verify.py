@@ -17,6 +17,7 @@ working, and posts a compact Discord report:
 Run via cron every hour.
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -42,7 +43,13 @@ def load_json(path):
 
 def save_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # ATOMIC WRITE (2026-09-06): temp + os.replace so a concurrent dispatcher
+    # (every 5min) never reads a half-written board.json while we unblock
+    # parked tasks (hourly). Direct write_text truncates in place → race
+    # surfaced corrupt/truncated boards in the 2-week deadlock class.
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def load_webhook():

@@ -200,8 +200,9 @@ def live_game_context() -> str:
 
 def call_model(prompt: str) -> str:
     body = json.dumps({"model": MODEL, "prompt": prompt, "stream": False,
-                       "temperature": 0.1, "keep_alive": "30m",
-                       "num_predict": 16384, "num_ctx": 32768}).encode()
+                       "keep_alive": "30m",
+                       "options": {"num_predict": 16384, "num_ctx": 32768,
+                                   "temperature": 0.1}}).encode()
     req = urllib.request.Request(OLLAMA, data=body,
                                  headers={"Content-Type": "application/json"})
     # Bounded retry with backoff on HTTP 429 (rate limit) and 5xx (transient).
@@ -693,7 +694,7 @@ def main():
             pt = _sp.run([VENV, runner, "--gate"], capture_output=True,
                          text=True, timeout=1200)
             pt_out = (pt.stdout or "") + (pt.stderr or "")
-            m = re.search(r"GATE overall=([\d.]+) beat=([\d.]+) softlock=([\d.]+) verdict=(\w+)", pt_out)
+            m = re.search(r"GATE overall=([\d.]+) beat=([\d.]+) softlock=([\d.]+) (?:contract=\w+ )?verdict=(\w+)", pt_out)
             if m:
                 overall, beat, softlock, verdict = m.groups()
                 if verdict != "PASS":
@@ -735,7 +736,16 @@ def main():
         # orphan on master and the feature is incomplete. Do NOT report success:
         # returning 0 made the dispatcher mark the task done while the wired
         # class was missing from git history (ultra sweep #2 2026-09-06).
-        print(f"❌ {args.task}: merge ok but artifact commit ({artifact_rel}) failed: {ac.stderr.strip()}", flush=True)
+        # CRITICAL (ultra sweep #3): the ff-merge already landed the WIRE edits
+        # onto master (main.gd etc. now call the class). If we only return 1,
+        # master carries the wire but the dispatcher retries the SAME task —
+        # whose search_block can no longer match ("the class is already
+        # referenced") → task stuck, and master is half-shipped. Roll the merge
+        # back to the pre-wire base so master stays clean AND the task remains
+        # retryable. The untracked artifact survives on disk (reset --hard only
+        # touches tracked files).
+        print(f"❌ {args.task}: merge ok but artifact commit ({artifact_rel}) failed: {ac.stderr.strip()} — rolling back master to {base}", flush=True)
+        git(project, "reset", "--hard", "-q", base)
         return 1
     print(f"✅ {args.task}: WIRED + MERGED {fe} — {msg}", flush=True)
     print(git(project, "log", "--oneline", "-3").stdout.strip(), flush=True)

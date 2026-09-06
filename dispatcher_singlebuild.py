@@ -15,6 +15,14 @@ VENV_PY = VENV
 WIRE_MODEL = "hf.co/Ruler97/Godoter-27B-GGUF:q4_K_M"  # inline serial wirer (proven). Cloud-parallel via separate cloud_wire_worker.py
 WIRE_HOOK = "C:/Users/bluue/AppData/Local/hermes/scripts/wire_artifact.py"
 OLLAMA = "http://127.0.0.1:11434/api/generate"
+# PARKED-MARKER SKIP TUPLE (2026-09-06): the ONE source of truth for which
+# park-note prefixes keep a task out of the pending pool / task selection.
+# ANY code that excludes "parked" tasks MUST reference this constant — never a
+# hand-copied literal. Every NEW park-note prefix (e.g. "cloud review
+# rejected") must be added HERE (and only here) + to hourly_verify.py's own
+# copy. Missing one resurrects rejected tasks into an infinite retry loop.
+PARKED_MARKERS = ("parked after", "parked: fabricated", "wire step failed",
+                  "cloud review rejected")
 # PRIMARY producer (2026-09-06): Godoter-27B — the proven reliable GDScript writer.
 # FALLBACK (2026-09-06): bluu-nano-v4 (fine-tuned GDScript model, 4096-seq).
 # 2026-09-06 FLIP: Godoter is now PRIMARY. v4 underperforms on the real dispatcher
@@ -412,7 +420,15 @@ def load_json(p):
     except Exception: return {}
 
 def save_json(p, data):
-    json.dump(data, open(p, "w", encoding="utf-8"), indent=1)
+    # ATOMIC WRITE (2026-09-06): write a temp file then os.replace so a
+    # concurrent reader (hourly_verify, cloud_wire_worker) never sees a
+    # half-written/truncated board.json. Direct json.dump truncates in place,
+    # so a race with another process's read could surface parse errors /
+    # lost updates (the board-clobber class the 2-week deadlock came from).
+    tmp = p.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1)
+    os.replace(tmp, p)
 
 def gpu_safe(min_free_gb=2.0, max_util=20.0):
     """GPU pre-flight guard. Three outcomes:
@@ -772,7 +788,7 @@ def playtest_gate(project: Path, timeout: int = 600):
         r = subprocess.run([VENV, str(runner), "--gate"],
                            capture_output=True, text=True, timeout=timeout)
         out = (r.stdout or "") + (r.stderr or "")
-        m = re.search(r"GATE overall=([\d.]+) beat=([\d.]+) softlock=([\d.]+) verdict=(\w+)", out)
+        m = re.search(r"GATE overall=([\d.]+) beat=([\d.]+) softlock=([\d.]+) (?:contract=\w+ )?verdict=(\w+)", out)
         if m:
             overall, beat, softlock, verdict = m.groups()
             ok = (verdict == "PASS")
@@ -1327,10 +1343,8 @@ def main():
         # ("parked: cloud review rejected ...") was MISSING from the marker list,
         # so unblock_parked resurrected scope/API-review tasks into an infinite
         # retry loop (kimi/ultra sweep #2 2026-09-06) — added it.
-        parked_marker = ("parked after", "parked: fabricated", "wire step failed",
-                         "cloud review rejected")
         pending = [t for t in (cols.get("backlog", []) + cols.get("ready", []))
-                   if not any(m in str(t.get("note", "")) for m in parked_marker)
+                   if not any(m in str(t.get("note", "")) for m in PARKED_MARKERS)
                    and not is_junk_title(t.get("title", ""))]
         if len(pending) < MIN_PENDING:
             refill_dept(dept, board, cols, MIN_PENDING - len(pending))
@@ -1446,8 +1460,7 @@ def main():
             # >= MIN_PENDING). Exclude by BOTH blocked-column ID and the note's
             # parked marker, regardless of which column the task sits in.
             blocked_ids = {t.get("id") for t in cols.get("blocked",[]) if isinstance(t,dict)}
-            parked_marker = ("parked after", "parked: fabricated", "wire step failed",
-                             "cloud review rejected")
+            parked_marker = PARKED_MARKERS
             # JUNK-TITLE SKIP (2026-09-04): exclude tasks whose title is a
             # meta-instruction echo (the idea-generator parroting its format
             # prompt). These were created before the generate_fresh_ideas
