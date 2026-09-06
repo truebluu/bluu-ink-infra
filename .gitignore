@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Local state — never commit runtime boards/state (they live under hermes/, not here)
+*.jsonl
+state/
+board.json*
+
+# OS junk
+.DS_Store
+Thumbs.db
