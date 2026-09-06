@@ -1,0 +1,7 @@
+# These scripts have CRLF line endings on disk (Windows). Force git to keep
+# LF in the repo but check out CRLF on Windows, so the runtime copy under
+# hermes/scripts/ is byte-identical to what launchers read. Prevents noisy
+# whole-file diffs from line-ending normalization.
+*.py text eol=crlf
+*.md text eol=crlf
+.gitignore text eol=lf
