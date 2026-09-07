@@ -162,9 +162,18 @@ def check_stub(code: str) -> list[str]:
     has_class = bool(re.search(r"^\s*class_name\s+\w+", code, re.M))
     has_extend = bool(re.search(r"^\s*extends\s+\w+", code, re.M))
     has_func = bool(re.search(r"^\s*func\s+\w+", code, re.M))
-    if not (has_class or has_extend) or not has_func:
-        reasons.append("stub: no class_name/extends and no func — does not implement the task")
+    has_signal = bool(re.search(r"^\s*signal\s+\w+", code, re.M))
+    has_export = bool(re.search(r"^\s*@export", code, re.M))
+    # A signal-only or @export-vars-only class (data/signal container) is a
+    # VALID Godot pattern with no funcs — don't reject it (2026-09-07 review).
+    if not (has_class or has_extend):
+        reasons.append("stub: no class_name/extends — does not implement the task")
         return reasons
+    if not has_func and not (has_signal or has_export):
+        reasons.append("stub: no func and no signal/@export — does not implement the task")
+        return reasons
+    if not has_func:
+        return reasons  # signal/export container is valid
 
     # Every function body must contain a real statement, not just pass/return.
     # A file whose only funcs are `func _ready(): pass` is a stub even though
@@ -197,11 +206,22 @@ def check_stub(code: str) -> list[str]:
                 break  # dedent -> body ended
             body_lines.append(line)
         # Strip comments from each body line, then look for a real statement.
+        # A body that is ONLY a variable declaration (`var x = 0`) or a trivial
+        # literal return (`return 42`) is still a stub — it does no work
+        # (2026-09-07 review: kimi + gpt-oss flagged these as false negatives).
         for bl in body_lines:
             stmt = re.sub(r"#.*$", "", bl).strip()
-            if stmt and stmt not in ("pass", "return", "return 0", "return true", "return false"):
-                real_work = True
-                break
+            if not stmt:
+                continue
+            if stmt in ("pass", "return", "return 0", "return true", "return false"):
+                continue
+            # Reject pure var/const declarations and trivial literal returns.
+            if re.match(r"^(var|const)\s+\w+\s*=", stmt):
+                continue
+            if re.match(r"^return\s+(\d+|true|false|null|\"[^\"]*\"|'[^']*'|\w+\.\w+)$", stmt):
+                continue
+            real_work = True
+            break
         if real_work:
             break
     if not real_work:
