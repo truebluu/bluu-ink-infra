@@ -15,7 +15,7 @@ Per tick:
 import json, re, subprocess, sys, datetime, urllib.request
 from pathlib import Path
 
-from bluu_ink_constants import atomic_write_json
+from bluu_ink_constants import atomic_write_json, acquire_run_lock, release_run_lock
 
 BOTS = Path("C:/Users/bluue/AppData/Local/hermes/bots")
 ROADMAP = Path("C:/Users/bluue/AppData/Local/hermes/projects/harmony/next_tranche.md")
@@ -83,7 +83,7 @@ def parse_tasks(text, dept):
     return tasks
 
 
-def main():
+def _run():
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     report = [f"🔧 **Bluu Ink Cloud Replenisher** — {now}"]
 
@@ -149,6 +149,21 @@ def main():
             report.append(f"  {dept}: ERROR {e}")
 
     print("\n".join(report))
+
+
+def main():
+    # Sweep #7 (approved): this cron writes board.json (refill tasks), so it must
+    # honor the SINGLE-INSTANCE run lock the dispatcher + cloud_wire_worker use.
+    # Without it, a replenisher that fired mid-run would read-modify-write a stale
+    # board and clobber the dispatcher's in-flight updates (the board-clobber race).
+    if not acquire_run_lock():
+        # a live dispatcher/cloud_wire_worker holds run.lock -> skip this tick.
+        print("⏭ run lock held by a pipeline process — skipping replenisher tick")
+        return
+    try:
+        _run()
+    finally:
+        release_run_lock()
 
 
 if __name__ == "__main__":

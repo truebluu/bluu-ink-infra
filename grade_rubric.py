@@ -177,6 +177,29 @@ class GDScriptRubric:
                 'hard_parse_gate': 'FAILED — file does not compile, graded 0/F',
             })
 
+        # HARD ANTI-SLOP GATE (2026-09-06, sweep-7): a file that trips the runaway-
+        # repetition detector (anti_slop = 0) is rejected outright, even if it is
+        # syntactically valid. Previously the -5 dimension was advisory, so a
+        # 20x-copy-pasted but valid file could still score up to 95 and be marked
+        # done — only to fail at the wire step's full-project --import / playtest
+        # gate. Runaway repetition is the #2 producer-failure mode (after parse).
+        if anti_slop_score <= 0:
+            return RubricResult(0, 'F', {
+                'correctness': 0, 'completeness': 0, 'idiomatic_quality': 0,
+                'architecture_integration': 0, 'robustness_style': 0, 'anti_slop': 0,
+            }, {
+                'correctness': correctness_details,
+                'completeness': completeness_details,
+                'idiomatic_quality': idiomatic_details,
+                'architecture_integration': architecture_details,
+                'robustness_style': robustness_details,
+                'anti_slop': anti_slop_details,
+                'file': str(path),
+                'lines': len(lines),
+                'non_empty_lines': len([l for l in lines if l.strip()]),
+                'hard_anti_slop_gate': 'FAILED — runaway repetition detected, graded 0/F',
+            })
+
         # Weighted total (sum = 100)
         breakdown = {
             'correctness': correctness_score,      # 35

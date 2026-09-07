@@ -67,7 +67,10 @@ def post_discord(webhook, text):
         return
     try:
         import requests
-        r = requests.post(webhook, json={"content": text}, timeout=15)
+        # Cloudflare 1010 trap (2026-09-04): bare python-requests UA gets blocked by
+        # Discord's edge. Must send a browser-like UA or the post is rejected (HTTP 1010).
+        r = requests.post(webhook, json={"content": text}, timeout=15,
+                          headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"})
         print(f"  discord post: {r.status_code}")
     except Exception as e:
         print(f"  discord post error: {e}")

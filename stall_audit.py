@@ -6,7 +6,7 @@ reports a health summary to Discord. Run via cron every hour.
 import json, subprocess, sys, datetime, urllib.request
 from pathlib import Path
 
-from bluu_ink_constants import PARKED_MARKERS, atomic_write_json
+from bluu_ink_constants import PARKED_MARKERS, atomic_write_json, acquire_run_lock, release_run_lock
 
 BOTS = Path("C:/Users/bluue/AppData/Local/hermes/bots")
 VENV = "C:/Users/bluue/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe"
@@ -270,5 +270,21 @@ def audit():
     post_discord(get_webhook(), report)
 
 
+def main():
+    # Sweep #7 (approved): unblock_parked() writes board.json (moves parked tasks
+    # back to ready). It must honor the SINGLE-INSTANCE run lock, or a stall-audit
+    # firing mid-dispatcher-run would read-modify-write a stale board and clobber
+    # the dispatcher's in-flight updates (the board-clobber race). If the lock is
+    # held, skip this tick rather than race.
+    if not acquire_run_lock():
+        # a live dispatcher/cloud_wire_worker holds run.lock -> skip this tick.
+        print("⏭ run lock held by a pipeline process — skipping stall-audit tick")
+        return
+    try:
+        audit()
+    finally:
+        release_run_lock()
+
+
 if __name__ == "__main__":
-    audit()
+    main()
