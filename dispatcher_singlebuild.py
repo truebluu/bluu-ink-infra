@@ -632,7 +632,8 @@ def validate_godot(project: Path):
 DRIFT_PATTERNS = [
     (r"\byield\s*\(", "yield()", "use await"),
     (r"\.instance\s*\(\s*\)", ".instance()", "use .instantiate()/.new()"),
-    (r"\.is_connected\s*\(\s*\"", ".is_connected(\"", "Godot 4 takes a Callable, not a string"),
+    (r"\.is_connected\s*\(\s*\"[^\"]*\"\s*\)", ".is_connected(\"sig\")", "Godot 4 takes a Callable, not a bare string"),
+    (r"\.connect\s*\(\s*\"[^\"]*\"\s*,\s*(?!\s*Callable\s*\()\s*[^,)]+\s*,\s*\"", ".connect(\"sig\", obj, \"method\")", "Godot 4 uses signal.connect(callable)"),
     (r"\.add_color_override\s*\(", ".add_color_override(", "use add_theme_color_override"),
     (r"get_tree\(\)\.get_root\s*\(\s*\)", "get_tree().get_root()", "use get_tree().root"),
     (r"Engine\.(has_singleton|get_singleton)\s*\(\s*\"(GameState|EventBus|EnergySystem|CreatureCodex|SharedRNG)\"",
@@ -649,8 +650,8 @@ DRIFT_PATTERNS = [
     (r"\bFile\.new\s*\(|Directory\.new\s*\(", "File/Directory.new()", "use FileAccess/DirAccess"),
     (r"\bfuncref\s*\(", "funcref(", "use Callable"),
     (r"\bsetget\b", "setget", "use set/get property syntax"),
-    (r"\bexport\s+var\b", "export var", "use @export var"),
-    (r"\b(?:onready)\s+var\b", "onready var", "use @onready var"),
+    (r"(?<!@)\bexport\s+var\b", "export var", "use @export var"),
+    (r"(?<!@)\bonready\s+var\b", "onready var", "use @onready var"),
 ]
 
 def check_drift(code: str):
