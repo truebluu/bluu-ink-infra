@@ -241,13 +241,34 @@ def local_review(gd_path: Path, dept: str, task: dict) -> tuple[bool, list[str]]
     if not (has_class or has_extend) or not has_func:
         reasons.append("stub: no class_name/extends and no func — does not implement the task")
     else:
-        func_bodies = re.findall(
-            r"^\s*func\s+\w+[^:]*\([^)]*\)[^:]*:\s*(.*)$", code, re.M
-        )
-        real_work = any(
-            b.strip() and b.strip() not in ("pass", "return", "return 0", "return true", "return false")
-            for b in func_bodies
-        )
+        # 2026-09-07 4-model review: the old regex `:\s*(.*)$` captured ONLY
+        # the same-line text after the colon, so standard multi-line GDStyle
+        # (`func _ready():` then body on the NEXT line) yielded an empty
+        # capture -> FALSE POSITIVE (rejected real artifacts). And
+        # `func foo(): # TODO` captured `# TODO` -> FALSE NEGATIVE. Extract
+        # the FULL indented body, strip comments, check for a real statement.
+        real_work = False
+        for m in re.finditer(r"^\s*func\s+\w+[^:]*\([^)]*\)[^:]*:\s*(.*)$", code, re.M):
+            sig_line = m.group(0)
+            first_body = m.group(1)
+            body_lines = []
+            if first_body.strip():
+                body_lines.append(first_body)
+            sig_indent = len(sig_line) - len(sig_line.lstrip())
+            for line in code[m.end():].split("\n"):
+                if not line.strip():
+                    continue
+                indent = len(line) - len(line.lstrip())
+                if indent <= sig_indent:
+                    break
+                body_lines.append(line)
+            for bl in body_lines:
+                stmt = re.sub(r"#.*$", "", bl).strip()
+                if stmt and stmt not in ("pass", "return", "return 0", "return true", "return false"):
+                    real_work = True
+                    break
+            if real_work:
+                break
         if not real_work:
             reasons.append("stub: all function bodies are pass/return-only — no real implementation")
 

@@ -169,14 +169,40 @@ def check_stub(code: str) -> list[str]:
     # Every function body must contain a real statement, not just pass/return.
     # A file whose only funcs are `func _ready(): pass` is a stub even though
     # it declares a class and a func.
-    func_bodies = re.findall(
-        r"^\s*func\s+\w+[^:]*\([^)]*\)[^:]*:\s*(.*)$", code, re.M
-    )
+    #
+    # 2026-09-07 4-model review (deepseek/kimi/gpt-oss all flagged): the old
+    # regex `:\s*(.*)$` captured ONLY the same-line text after the colon, so
+    # standard multi-line GDStyle (`func _ready():` then body on the NEXT
+    # line) yielded an empty capture -> FALSE POSITIVE (rejected real
+    # artifacts). And `func foo(): # TODO` captured `# TODO` (non-empty, not
+    # in the allowlist) -> FALSE NEGATIVE (comment-only body passed). Fix:
+    # extract the FULL indented body of each func, strip comments, and check
+    # for a real statement.
     real_work = False
-    for body in func_bodies:
-        body = body.strip()
-        if body and body not in ("pass", "return", "return 0", "return true", "return false"):
-            real_work = True
+    for m in re.finditer(r"^\s*func\s+\w+[^:]*\([^)]*\)[^:]*:\s*(.*)$", code, re.M):
+        sig_line = m.group(0)
+        first_body = m.group(1)
+        # Collect the full indented body: lines after the signature that are
+        # indented deeper than the func's own indent (or any indented line).
+        body_lines = []
+        if first_body.strip():
+            body_lines.append(first_body)
+        sig_indent = len(sig_line) - len(sig_line.lstrip())
+        rest = code[m.end():].split("\n")
+        for line in rest:
+            if not line.strip():
+                continue  # blank line inside body
+            indent = len(line) - len(line.lstrip())
+            if indent <= sig_indent:
+                break  # dedent -> body ended
+            body_lines.append(line)
+        # Strip comments from each body line, then look for a real statement.
+        for bl in body_lines:
+            stmt = re.sub(r"#.*$", "", bl).strip()
+            if stmt and stmt not in ("pass", "return", "return 0", "return true", "return false"):
+                real_work = True
+                break
+        if real_work:
             break
     if not real_work:
         reasons.append("stub: all function bodies are pass/return-only — no real implementation")
