@@ -86,7 +86,7 @@ def parked(note: str) -> bool:
 # wire 30min) plus refill/grow_dataset; use a generous ceiling so a legit
 # long run is never stolen and run twice.
 import socket
-RUN_LOCK_STALE_SECS = 7200  # 2h; exceeds the worst-case 3x-wire run
+RUN_LOCK_STALE_SECS = 10800  # 3h; exceeds worst-case 3x-wire(1800s)=5400s + 3x model-call(600s) + refill ceiling
 
 # Per-entry-script lock path so dispatcher and cloud_wire_worker each guard
 # their OWN concurrency (they run on different crons and MAY legally both be

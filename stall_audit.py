@@ -6,7 +6,7 @@ reports a health summary to Discord. Run via cron every hour.
 import json, subprocess, sys, datetime, urllib.request
 from pathlib import Path
 
-from bluu_ink_constants import PARKED_MARKERS
+from bluu_ink_constants import PARKED_MARKERS, atomic_write_json
 
 BOTS = Path("C:/Users/bluue/AppData/Local/hermes/bots")
 VENV = "C:/Users/bluue/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe"
@@ -74,8 +74,10 @@ def unblock_parked(board_path):
         t.pop("blocked_reason", None)
         cols.setdefault("ready", []).append(t)
     cols["blocked"] = keep
-    with open(board_path, "w", encoding="utf-8") as f:
-        json.dump(board, f, indent=2)
+    # Sweep #6: atomic write — the LAST non-atomic board.json writer. Every other
+    # writer (dispatcher, cloud_replenisher) already uses atomic_write_json; a
+    # plain truncating write here races them and re-opens the corruption class.
+    atomic_write_json(board_path, board, indent=2)
     return len(unblock)
 
 
