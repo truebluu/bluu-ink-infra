@@ -623,6 +623,45 @@ def validate_godot(project: Path):
     err = r.stdout + r.stderr
     return not ("SCRIPT ERROR" in err or "Parse Error" in err or "Compile Error" in err or "Cannot open" in err)
 
+# GODOT-3->4 DRIFT GATE (2026-09-07, user directive: stop relying on 4-model reviews).
+# --import / --check-only are PARSE-ONLY and do NOT type-check (proven empirically:
+# invalid padding_left/auto_size/clear() on Label passes both with exit 0). A model
+# can emit Godot-3 idioms that parse clean but are runtime errors or dead code in
+# Godot 4. This regex gate catches the drift family BEFORE the artifact ships. It is
+# the same pattern family as gdscript_drift_gate.py (training dir) — keep in sync.
+DRIFT_PATTERNS = [
+    (r"\byield\s*\(", "yield()", "use await"),
+    (r"\.instance\s*\(\s*\)", ".instance()", "use .instantiate()/.new()"),
+    (r"\.is_connected\s*\(\s*\"", ".is_connected(\"", "Godot 4 takes a Callable, not a string"),
+    (r"\.add_color_override\s*\(", ".add_color_override(", "use add_theme_color_override"),
+    (r"get_tree\(\)\.get_root\s*\(\s*\)", "get_tree().get_root()", "use get_tree().root"),
+    (r"Engine\.(has_singleton|get_singleton)\s*\(\s*\"(GameState|EventBus|EnergySystem|CreatureCodex|SharedRNG)\"",
+     "Engine.*singleton(autoload)", "autoloads are NOT engine singletons; access directly"),
+    (r"OS\.get_memory_usage\s*\(", "OS.get_memory_usage()", "use OS.get_memory_info()[\"physical\"]"),
+    (r"OS\.get_ticks_msec\s*\(", "OS.get_ticks_msec()", "use Time.get_ticks_msec()"),
+    (r"\bPool(Byte|Int|Real|String|Vector2|Vector3|Color|StringArray|IntArray|RealArray)\b",
+     "Pool*Array", "use Packed*Array"),
+    (r"\bPosition2D\b", "Position2D", "use Marker2D"),
+    (r"\bSpatialMaterial\b", "SpatialMaterial", "use StandardMaterial3D"),
+    (r"\bKinematicBody2D\b", "KinematicBody2D", "use CharacterBody2D"),
+    (r"\b(?:master|slave|puppet|remotesync|puppetsync)\s+func\b", "master/slave/puppet func", "use @rpc"),
+    (r"\brand_range\s*\(", "rand_range(", "use randf_range"),
+    (r"\bFile\.new\s*\(|Directory\.new\s*\(", "File/Directory.new()", "use FileAccess/DirAccess"),
+    (r"\bfuncref\s*\(", "funcref(", "use Callable"),
+    (r"\bsetget\b", "setget", "use set/get property syntax"),
+    (r"\bexport\s+var\b", "export var", "use @export var"),
+    (r"\b(?:onready)\s+var\b", "onready var", "use @onready var"),
+]
+
+def check_drift(code: str):
+    """Return list of (pattern, hint) Godot-3 drift hits in the artifact code."""
+    hits = []
+    for pat, label, hint in DRIFT_PATTERNS:
+        if re.search(pat, code):
+            hits.append((label, hint))
+    return hits
+
+
 def _project_autoloads(project: Path) -> set:
     """Read the project.godot [autoload] section to get registered autoload names."""
     try:
@@ -1053,6 +1092,21 @@ def build(dept, task):
         task["_last_code"] = code
         return None
     gd.write_text(code, encoding="utf-8")
+    # GODOT-3->4 DRIFT GATE (2026-09-07): --import is parse-only and does NOT
+    # type-check, so a model can emit Godot-3 idioms (yield, instance(), setget,
+    # Engine.has_singleton on autoloads) that parse clean but are runtime errors
+    # or dead code in Godot 4. Catch them here BEFORE the compile gate. This is
+    # the recurrence guard for the drift that kept shipping (bluu-nano-v4 wrote
+    # OS.get_ticks_msec, add_color_override, etc. that passed --import).
+    drift_hits = check_drift(code)
+    if drift_hits:
+        print(f"  FAIL {tid}: Godot-3 drift: {[h[0] for h in drift_hits]}", flush=True)
+        task["_last_breakdown"] = task.get("_last_breakdown", {})
+        task["_last_breakdown"]["integration_errors"] = [
+            f"drift: {label} ({hint})" for label, hint in drift_hits]
+        task["_last_code"] = code
+        gd.unlink(missing_ok=True)
+        return None
     # PER-FILE COMPILE GATE (2026-09-05): Godot --import does NOT compile
     # unreferenced scripts, so a broken artifact passed the old validate_godot
     # silently and only failed at the wire step (when main.gd referenced it).
