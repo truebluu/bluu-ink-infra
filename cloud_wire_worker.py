@@ -28,6 +28,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Shared constants: PARKED_MARKERS + LOCK_STALE_SECS are the single source of
+# truth (bluu_ink_constants.py, same dir). LOCK_STALE_SECS MUST exceed the
+# wire_artifact subprocess timeout (1800s) so a slow-but-alive wire is never
+# stolen and run twice (2026-09-06 sweep #4, ultra Finding 2).
+from bluu_ink_constants import atomic_write_json, LOCK_STALE_SECS
+
 BOTS = Path("C:/Users/bluue/AppData/Local/hermes/bots")
 GALAGE = Path("C:/Users/bluue/Documents/Galage")
 SANCTUARY = Path("C:/Users/bluue/Documents/Sanctuary")
@@ -47,8 +53,6 @@ PROJECTS = {
     "sanctuary": SANCTUARY,
     "harmony": GALAGE,
 }
-
-LOCK_STALE_SECS = 900  # a lock older than 15 min is stale (crashed holder) -> steal it
 
 
 def _utcnow():
@@ -130,7 +134,10 @@ def record_sidecar(task_id, artifact, feature_id, title):
         "task_id": task_id, "artifact": str(artifact),
         "feature_id": feature_id, "title": title, "wired_at": _utcnow(),
     })
-    SIDECAR.write_text(json.dumps(entries, indent=1), encoding="utf-8")
+    # ATOMIC write (tmp + os.replace): the dispatcher also reads+rewrites this
+    # sidecar every tick; pid-unique tmp so the two writers never collide on
+    # one temp filename. Sweep #4 (deepseek).
+    atomic_write_json(SIDECAR, entries, indent=1)
 
 
 def record_ledger(dept, task_id, title, artifact, score, note):

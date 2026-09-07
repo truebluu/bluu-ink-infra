@@ -24,6 +24,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Shared park-marker list (single source of truth with dispatcher_singlebuild.py).
+# A divergent hand-copy resurrects parked tasks into an infinite retry loop.
+from bluu_ink_constants import atomic_write_json, PARKED_MARKERS
+
 HERMES = Path("C:/Users/bluue/AppData/Local/hermes")
 BOTS_DIR = HERMES / "bots"
 CONFIG = Path("C:/Users/bluue/AppData/Local/bluu-ink/config.json")
@@ -42,14 +46,11 @@ def load_json(path):
 
 
 def save_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
     # ATOMIC WRITE (2026-09-06): temp + os.replace so a concurrent dispatcher
-    # (every 5min) never reads a half-written board.json while we unblock
-    # parked tasks (hourly). Direct write_text truncates in place → race
-    # surfaced corrupt/truncated boards in the 2-week deadlock class.
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    # (every 5min) never reads a half-written board.json. Sweep #4 (deepseek):
+    # use the SHARED pid-unique writer — a deterministic ".json.tmp" collides
+    # when two writers touch the same file concurrently.
+    atomic_write_json(path, data, indent=2)
 
 
 def load_webhook():
@@ -188,12 +189,10 @@ def unblock_parked(board_path):
     blocked = cols.get("blocked", [])
     if not blocked:
         return 0
-    parked_markers = ("parked after", "parked: fabricated", "wire step failed",
-                      "cloud review rejected")
     moved_ids = set()
     for t in blocked:
         note = (t.get("note") or "").lower()
-        if any(m in note for m in parked_markers):
+        if any(m in note for m in PARKED_MARKERS):
             continue  # dispatcher-parked — leave blocked, don't resurrect
         t["status"] = "ready"
         t.pop("fail_count", None)
@@ -203,7 +202,13 @@ def unblock_parked(board_path):
     # Keep only tasks that were NOT moved (tracked by id, not status — a parked
     # task may have no 'status' field at all, so filtering on status would drop it).
     cols["blocked"] = [t for t in blocked if t.get("id") not in moved_ids]
-    save_json(board_path, board)
+    # RMW clobber fix (sweep #4, kimi): only rewrite the board when something
+    # was actually moved. Writing unconditionally (every hour, whenever any
+    # blocked task exists) risked clobbering a concurrent dispatcher board write
+    # (the dispatcher holds a stale board across a long build()). A no-op move
+    # should never touch the file.
+    if moved_ids:
+        save_json(board_path, board)
     return len(moved_ids)
 
 

@@ -5,6 +5,12 @@ Godoter-27B via Ollama, validates --import, grades with --project-root."""
 import json, re, subprocess, datetime, urllib.request, os, time
 from pathlib import Path
 
+# Shared constants (single source of truth): PARKED_MARKERS + LOCK_STALE_SECS.
+# See bluu_ink_constants.py — same dir, auto-resolved on sys.path. Do NOT
+# redefine these here (a divergent hand-copy resurrects parked tasks / steals a
+# live wire lock). 2026-09-06 sweep #4 consolidation.
+from bluu_ink_constants import atomic_write_json, PARKED_MARKERS, LOCK_STALE_SECS
+
 BOTS = Path("C:/Users/bluue/AppData/Local/hermes/bots")
 GALAGE = Path("C:/Users/bluue/Documents/Galage")
 SANCTUARY = Path("C:/Users/bluue/Documents/Sanctuary")
@@ -15,14 +21,6 @@ VENV_PY = VENV
 WIRE_MODEL = "hf.co/Ruler97/Godoter-27B-GGUF:q4_K_M"  # inline serial wirer (proven). Cloud-parallel via separate cloud_wire_worker.py
 WIRE_HOOK = "C:/Users/bluue/AppData/Local/hermes/scripts/wire_artifact.py"
 OLLAMA = "http://127.0.0.1:11434/api/generate"
-# PARKED-MARKER SKIP TUPLE (2026-09-06): the ONE source of truth for which
-# park-note prefixes keep a task out of the pending pool / task selection.
-# ANY code that excludes "parked" tasks MUST reference this constant — never a
-# hand-copied literal. Every NEW park-note prefix (e.g. "cloud review
-# rejected") must be added HERE (and only here) + to hourly_verify.py's own
-# copy. Missing one resurrects rejected tasks into an infinite retry loop.
-PARKED_MARKERS = ("parked after", "parked: fabricated", "wire step failed",
-                  "cloud review rejected")
 # PRIMARY producer (2026-09-06): Godoter-27B — the proven reliable GDScript writer.
 # FALLBACK (2026-09-06): bluu-nano-v4 (fine-tuned GDScript model, 4096-seq).
 # 2026-09-06 FLIP: Godoter is now PRIMARY. v4 underperforms on the real dispatcher
@@ -420,15 +418,11 @@ def load_json(p):
     except Exception: return {}
 
 def save_json(p, data):
-    # ATOMIC WRITE (2026-09-06): write a temp file then os.replace so a
-    # concurrent reader (hourly_verify, cloud_wire_worker) never sees a
-    # half-written/truncated board.json. Direct json.dump truncates in place,
-    # so a race with another process's read could surface parse errors /
-    # lost updates (the board-clobber class the 2-week deadlock came from).
-    tmp = p.with_suffix(".json.tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=1)
-    os.replace(tmp, p)
+    # ATOMIC WRITE (2026-09-06): temp + os.replace so a concurrent reader
+    # (hourly_verify, cloud_wire_worker) never sees a half-written board.json.
+    # Sweep #4 (deepseek): use the SHARED pid-unique writer — a deterministic
+    # ".json.tmp" collides when two writers touch the same file concurrently.
+    atomic_write_json(p, data, indent=1)
 
 def gpu_safe(min_free_gb=2.0, max_util=20.0):
     """GPU pre-flight guard. Three outcomes:
@@ -1383,7 +1377,12 @@ def main():
     all_titles = [t.get("title","").lower() for c in cols.values()
                   for t in (c if isinstance(c,list) else [])]
     if not any("triple" in t for t in all_titles):
-        ids=[int(m.group(1)) for t in cols.get("done",[])+cols.get("backlog",[])
+        # Max-ID must span ALL columns (done+backlog+ready+blocked). Scanning only
+        # done+backlog undercounts when a higher-numbered task sits in ready/blocked
+        # -> new FORGE-{hi+1} collides, and ID-based removal drops BOTH tasks.
+        # Sweep #4 (deepseek Finding).
+        ids=[int(m.group(1)) for col in cols.values()
+             for t in (col if isinstance(col,list) else [])
              if (m:=re.match(r"FORGE-(\d+)", t.get("id","")))]
         hi = max(ids) if ids else 983
         cols.setdefault("backlog",[]).append({
@@ -1449,7 +1448,10 @@ def main():
                         save_json(bp, board)
                         # clear ONLY the entries actually marked done (others stay for next tick)
                         _remaining = [w for w in _wired if w.get("task_id") not in _processed_ids]
-                        _sc.write_text(json.dumps(_remaining, indent=1), encoding="utf-8")
+                        # ATOMIC write (tmp + os.replace): the cloud worker appends to this
+                        # sidecar concurrently; truncate-in-place risks a half-written JSON.
+                        # Sweep #4: pid-unique tmp so both writers never collide on one file.
+                        atomic_write_json(_sc, _remaining, indent=1)
                 except Exception as _e:
                     print(f"  ⚠ reconcile sidecar failed: {_e}", flush=True)
             pool = cols.get("backlog",[]) + cols.get("ready",[])
@@ -1526,7 +1528,7 @@ def main():
                 task["_last_breakdown"] = task.get("_last_breakdown", {})
                 task["_last_breakdown"]["integration_errors"] = rev_reasons
                 task["_last_code"] = Path(gd).read_text(encoding="utf-8", errors="replace")
-                task["note"] = f"cloud review rejected: {rev_reasons[0]} (attempt {task['attempts']})"
+                task["note"] = f"cloud review needs-fix: {rev_reasons[0]} (attempt {task['attempts']})"
                 if task["attempts"] >= MAX_ATTEMPTS:
                     task["status"] = "blocked"
                     task["note"] = ("parked: cloud review rejected "
@@ -1566,7 +1568,7 @@ def main():
                     # held by a live cloud worker -> yield (or steal if stale)
                     try:
                         _age = time.time() - _wl.stat().st_mtime
-                        if _age < 900:  # held by a live cloud worker -> yield
+                        if _age < LOCK_STALE_SECS:  # held by a live wire/cloud worker -> yield
                             print(f"  ⏭ {dept} {task['id']}: wire lock held (cloud worker) — deferring", flush=True)
                             continue
                         else:  # stale lock -> steal
@@ -1580,7 +1582,12 @@ def main():
                                 print(f"  ⏭ {dept} {task['id']}: wire lock re-acquired by peer — deferring", flush=True)
                                 continue
                     except OSError:
-                        pass
+                        # Lock file vanished between FileExistsError and stat
+                        # (peer released/removed). Do NOT run wire unlocked —
+                        # defer instead. Sweep #4 (deepseek): `pass` here let a
+                        # TOCTOU race proceed with _acquired=False (no lock).
+                        print(f"  ⏭ {dept} {task['id']}: wire lock check raced — deferring", flush=True)
+                        continue
                 wire_hook = PROJECTS[dept]["wire_hook"]
                 try:
                     wr = subprocess.run([VENV_PY, wire_hook, "--dept", dept,
