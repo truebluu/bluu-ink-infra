@@ -14,6 +14,45 @@ from bluu_ink_constants import atomic_write_json, PARKED_MARKERS, LOCK_STALE_SEC
 BOTS = Path("C:/Users/bluue/AppData/Local/hermes/bots")
 GALAGE = Path("C:/Users/bluue/Documents/Galage")
 SANCTUARY = Path("C:/Users/bluue/Documents/Sanctuary")
+
+# CROSS-REPO ROUTING SAFETY (2026-09-07): creature/pet-domain content must NEVER
+# be written into the Galage (Galaga shooter) project. The 2026-08-23..26
+# misrouting incident put 69+ creature files into Galage because the dispatcher
+# had no domain check. This is the fail-closed gate: before writing any artifact,
+# assert the task's department maps to the correct project AND the artifact's
+# class_name/domain matches the target project's expected domain. A sanctuary
+# task writing a creature class into Galage is a hard abort.
+#   forge    -> GALAGE    (deny creature/pet domain tokens)
+#   sanctuary-> SANCTUARY (deny shmup/forge-only tokens)
+#   harmony  -> GALAGE    (shared lib; allow both, but deny creature classes
+#                          that belong in Sanctuary)
+CREATURE_DOMAIN_TOKENS = (
+    "Creature", "Breeding", "Habitat", "Genome", "Evolution", "Ecosystem",
+    "Pet", "Egg", "Taming", "Genetics", "Flock", "Codex", "Bonding",
+    "PhotoMode", "Migration", "Needs", "Glimmerwing", "Seasonal",
+    "Decoration", "AutoFeeder", "DayNight", "DynamicMusic", "Sanctuary",
+)
+FORGE_DOMAIN_TOKENS = (
+    "Enemy", "Wave", "Boss", "Ship", "Shmup", "Galaga", "Projectile",
+    "Powerup", "Spawner", "Formation", "Dive", "Laser", "Turret",
+)
+
+def routing_domain_assert(dept, code, tid):
+    """Fail-closed: reject an artifact whose domain doesn't match its project."""
+    if dept == "sanctuary":
+        # Sanctuary owns creature content; reject forge-only shmup classes.
+        for tok in FORGE_DOMAIN_TOKENS:
+            if re.search(rf"class_name\s+\w*{tok}\w*", code):
+                print(f"  ROUTE-REJECT {tid}: sanctuary artifact declares forge-domain class '{tok}'", flush=True)
+                return False
+        return True
+    # forge + harmony route to GALAGE. Reject creature-domain classes.
+    for tok in CREATURE_DOMAIN_TOKENS:
+        if re.search(rf"class_name\s+\w*{tok}\w*", code):
+            print(f"  ROUTE-REJECT {tid}: {dept} artifact declares creature-domain class '{tok}' — belongs in Sanctuary", flush=True)
+            return False
+    return True
+
 GODOT = "C:/Users/bluue/Downloads/Godot_v4.7.1-stable_win64.exe/Godot_v4.7.1-stable_win64.exe"
 GRADE = "C:/Users/bluue/AppData/Local/hermes/scripts/grade_rubric.py"
 VENV = "C:/Users/bluue/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe"
@@ -1001,6 +1040,16 @@ def build(dept, task):
         task["_last_breakdown"] = task.get("_last_breakdown", {})
         task["_last_breakdown"]["integration_errors"] = (
             ["no_gdscript: output contains no extends/class_name/func — pure prose, not code"])
+        task["_last_code"] = code
+        return None
+    # CROSS-REPO ROUTING SAFETY (2026-09-07): fail-closed domain gate. A
+    # sanctuary task must not write a forge-only shmup class, and a forge/harmony
+    # task must not write a creature-domain class into Galage. This is the
+    # recurrence guard for the 2026-08-23..26 misrouting incident.
+    if not routing_domain_assert(dept, code, tid):
+        task["_last_breakdown"] = task.get("_last_breakdown", {})
+        task["_last_breakdown"]["integration_errors"] = (
+            ["routing_domain: artifact class_name belongs to a different project's domain"])
         task["_last_code"] = code
         return None
     gd.write_text(code, encoding="utf-8")
