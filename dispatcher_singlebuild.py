@@ -231,12 +231,25 @@ def local_review(gd_path: Path, dept: str, task: dict) -> tuple[bool, list[str]]
 
     # 1. STUB CHECK: a real artifact must declare a class or extend a node and
     #    contain at least one func. A file that is only a const/comment/prose is
-    #    a stub that does not implement the task.
+    #    a stub that does not implement the task. (2026-09-07: also reject
+    #    pass/return-only function bodies — `func _ready(): pass` satisfies the
+    #    old class+func check, which is exactly how the degenerate 'output
+    #    exactly N lines' task family shipped const-only stubs into main.gd.)
     has_class = bool(re.search(r"^\s*class_name\s+\w+", code, re.M))
     has_extend = bool(re.search(r"^\s*extends\s+\w+", code, re.M))
     has_func = bool(re.search(r"^\s*func\s+\w+", code, re.M))
     if not (has_class or has_extend) or not has_func:
         reasons.append("stub: no class_name/extends and no func — does not implement the task")
+    else:
+        func_bodies = re.findall(
+            r"^\s*func\s+\w+[^:]*\([^)]*\)[^:]*:\s*(.*)$", code, re.M
+        )
+        real_work = any(
+            b.strip() and b.strip() not in ("pass", "return", "return 0", "return true", "return false")
+            for b in func_bodies
+        )
+        if not real_work:
+            reasons.append("stub: all function bodies are pass/return-only — no real implementation")
 
     # 2. FABRICATED EVENTBUS SIGNAL: any EventBus.<signal>.emit/connect where the
     #    signal is not in the known set. (api_gate already catches the string-API
@@ -1283,6 +1296,23 @@ _IDEA_POOL = {
         ("FORGE", "Enemy contact damage", "Enemies that collide with the player deal damage (dive crashes)", "medium", ["enemies","gameplay"]),
         ("FORGE", "Powerup impact feedback", "Each pickup visibly changes the player (sprite tint, size, fire pattern)", "medium", ["powerup","fx"]),
         ("FORGE", "Difficulty curve tuning", "Ensure wave 1 to final boss is winnable in one pass with recovery drops", "high", ["balance","progression"]),
+        # --- Re-added genuine proposals from dead-code sweep (2026-09-07) ---
+        ("FORGE", "Enemy Stagger Mechanic", "Heavy hits interrupt enemy fire and dive actions for a brief window, rewarding burst damage", "medium", ["ai","enemies","combat"]),
+        ("FORGE", "Player Afterimage Trail", "Ghost copies follow the player during dash or speed-boost powerups", "low", ["fx","player"]),
+        ("FORGE", "Formation Break Bonus", "Bonus score awarded when destroying multiple enemies in a single burst", "low", ["score","progression"]),
+        ("FORGE", "Shield Battery Powerup", "Absorbs incoming shots into a chargeable retaliatory blast", "medium", ["powerup","gameplay"]),
+        ("FORGE", "Enemy Taunt Aggro System", "Player can draw enemy fire to a chosen point to protect powerup drops", "medium", ["ai","enemies"]),
+        ("FORGE", "Wave Preview Radar", "HUD shows the next wave composition a few seconds before it spawns", "low", ["ui","progression"]),
+        ("FORGE", "Player Recoil Kick", "Rapid fire subtly pushes the ship, tying weapon use to movement control", "low", ["player","gameplay"]),
+        ("FORGE", "Enemy Respawn from Fragments", "Defeated enemies leave shards that reform if not cleaned up quickly", "medium", ["enemies","ai"]),
+        ("FORGE", "Critical Hit System", "Small random chance per shot to deal double damage with a flash effect", "medium", ["combat","fx"]),
+        ("FORGE", "Environmental Cover System", "Destructible floating cover objects that block enemy fire and projectiles", "medium", ["enemies","gameplay"]),
+        ("FORGE", "Enemy Bullet Magnet", "A powerup that attracts enemy bullets toward the player for a brief window", "medium", ["powerup","projectiles"]),
+        ("FORGE", "Wave Echo", "Defeated enemies leave a brief echo that fires a delayed shot at the player's last position", "medium", ["enemies","ai"]),
+        ("FORGE", "Enemy Formation Patrol", "Enemies patrol in formation patterns between waves, adding visual depth", "low", ["enemies","ai"]),
+        ("FORGE", "Boss Phase Transition", "Bosses shift attack patterns at health thresholds with a visual telegraph", "high", ["boss","ai"]),
+        ("FORGE", "Powerup Rarity Weighting", "Rarer powerups drop less often but are more impactful", "low", ["powerup","balance"]),
+        ("FORGE", "Enemy Weak Spot", "Enemies have a highlighted weak point that deals bonus damage when hit", "medium", ["enemies","combat"]),
     ],
     "sanctuary": [
         ("SANCT", "Creature idle animation states", "Add idle/bob animation states to creature sprites", "low", ["creatures","animation"]),

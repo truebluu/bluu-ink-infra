@@ -147,6 +147,42 @@ def check_drift(code: str):
             hits.append((label, hint))
     return hits
 
+
+def check_stub(code: str) -> list[str]:
+    """Return list of stub-rejection reasons for an artifact.
+
+    The dispatcher's stub gate (class_name/extends AND a func) is too weak:
+    `func _ready(): pass` satisfies it, which is exactly how the degenerate
+    'output exactly N lines' task family shipped const-only stubs into
+    main.gd (2026-09-07 dead-code sweep). A real artifact must have at least
+    one function whose body does real work — not just `pass`/`return`/a bare
+    const. Empty list = not a stub.
+    """
+    reasons = []
+    has_class = bool(re.search(r"^\s*class_name\s+\w+", code, re.M))
+    has_extend = bool(re.search(r"^\s*extends\s+\w+", code, re.M))
+    has_func = bool(re.search(r"^\s*func\s+\w+", code, re.M))
+    if not (has_class or has_extend) or not has_func:
+        reasons.append("stub: no class_name/extends and no func — does not implement the task")
+        return reasons
+
+    # Every function body must contain a real statement, not just pass/return.
+    # A file whose only funcs are `func _ready(): pass` is a stub even though
+    # it declares a class and a func.
+    func_bodies = re.findall(
+        r"^\s*func\s+\w+[^:]*\([^)]*\)[^:]*:\s*(.*)$", code, re.M
+    )
+    real_work = False
+    for body in func_bodies:
+        body = body.strip()
+        if body and body not in ("pass", "return", "return 0", "return true", "return false"):
+            real_work = True
+            break
+    if not real_work:
+        reasons.append("stub: all function bodies are pass/return-only — no real implementation")
+    return reasons
+
+
 MODEL = get_model()
 SMOKE = "res://scenes/forge800_main_smoke_test.tscn"
 VALIDATE = GALAGE / "scripts" / "validate_integration.py"
@@ -639,6 +675,16 @@ def main():
     _drift = check_drift(artifact.read_text(encoding="utf-8", errors="replace"))
     if _drift:
         print(f"❌ {args.task}: Godot-3 drift in artifact: {[h[0] for h in _drift]}", flush=True)
+        return 2
+
+    # STUB GATE (2026-09-07): the dispatcher's stub gate (class_name/extends AND
+    # a func) is too weak — `func _ready(): pass` satisfies it, which is exactly
+    # how the degenerate 'output exactly N lines' task family shipped const-only
+    # stubs into main.gd. Reject the wire here if every function body is
+    # pass/return-only (no real implementation).
+    _stub = check_stub(artifact.read_text(encoding="utf-8", errors="replace"))
+    if _stub:
+        print(f"❌ {args.task}: stub artifact rejected: {_stub}", flush=True)
         return 2
 
     # --spec injection: load a hand-authored spec so we can prove rollback
