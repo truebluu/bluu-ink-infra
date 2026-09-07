@@ -55,6 +55,102 @@ def parked(note: str) -> bool:
     return any(m in str(note or "") for m in PARKED_MARKERS)
 
 
+# --------------------------------------------------------------------------
+# RUN LOCK (single-instance guard)
+# --------------------------------------------------------------------------
+# Root cause of the "sanctuary/harmony/galaga created at the same time timeout
+# + GPU timeouts at the same time" (2026-09-06, sweep #5): the dispatcher cron
+# fires EVERY 5 MIN but a run can take 30+ minutes (up to 3 wire steps, each a
+# 1800s subprocess, run serially across 3 depts). Nothing stopped a SECOND
+# dispatcher from starting while the first was still running. Two concurrent
+# dispatchers then (a) BOTH hammer Ollama /api/generate -- each call_model has
+# a 600s hard timeout, and with the resident model busy serving the other
+# process the call blows past 600s -> timeout + task parked as build-failed;
+# and (b) BOTH clear_godot_cache() (rmtree .godot) then run Godot --import on
+# the SAME project -> cache-delete race + concurrent import on the GPU -> import
+# errors/hangs -> the GPU "times out". The cloud wire worker (15-min cron) has
+# the same overrun shape.
+#
+# The fix is a RUN lock identical in pattern to the proven wire.lock
+# (O_CREAT|O_EXCL, pid written, stale-steal). Every pipeline ENTRY script
+# (dispatcher, cloud wire worker) acquires it at the very top of main(); if it
+# is held by a LIVE process (mtime fresh), the script EXITS immediately
+# (skips this cron tick) rather than running concurrently. The run lock is
+# SEPARATE from wire.lock -- wire.lock serializes a single git-wire op between
+# the two processes; run.lock guarantees only ONE pipeline process total is
+# alive at a time (so the wire.lock serialization can never deadlock against
+# itself or against a double Godot --import on the same project).
+#
+# RUN_LOCK_STALE_SECS must exceed the longest single pipeline run. Dispatcher
+# runtime upper bound ~ 3 tasks x (model call up to ~10min + grade 5min +
+# wire 30min) plus refill/grow_dataset; use a generous ceiling so a legit
+# long run is never stolen and run twice.
+import socket
+RUN_LOCK_STALE_SECS = 7200  # 2h; exceeds the worst-case 3x-wire run
+
+# Per-entry-script lock path so dispatcher and cloud_wire_worker each guard
+# their OWN concurrency (they run on different crons and MAY legally both be
+# alive; the run lock prevents TWO COPIES OF THE SAME SCRIPT). Two different
+# scripts sharing a run lock would make the dispatcher skip while the cloud
+# worker runs -- that's fine and even safer. Use a shared lock: only one
+# pipeline entry point may be active at a time.
+RUN_LOCK_PATH = Path("C:/Users/bluue/AppData/Local/bluu-ink/state/run.lock")
+
+
+def acquire_run_lock() -> bool:
+    """Try to take the single-instance RUN lock. Returns True if acquired
+    (or if this script owns it), False if a LIVE peer holds it (caller must
+    exit/skip this tick). Stale-steal after RUN_LOCK_STALE_SECS."""
+    try:
+        RUN_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(RUN_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, f"{os.getpid()} {time.time()} {socket.gethostname()}".encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            age = time.time() - RUN_LOCK_PATH.stat().st_mtime
+            if age >= RUN_LOCK_STALE_SECS:
+                try:
+                    RUN_LOCK_PATH.unlink()
+                except OSError:
+                    pass
+                # retry acquire once
+                try:
+                    fd = os.open(str(RUN_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    os.write(fd, f"{os.getpid()} {time.time()} {socket.gethostname()}".encode())
+                    os.close(fd)
+                    return True
+                except FileExistsError:
+                    return False
+                except OSError:
+                    return False
+            return False
+        except OSError:
+            # lock vanished between stat and here -- peer released; retry once
+            try:
+                fd = os.open(str(RUN_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, f"{os.getpid()} {time.time()} {socket.gethostname()}".encode())
+                os.close(fd)
+                return True
+            except OSError:
+                return False
+    except OSError:
+        return False
+
+
+def release_run_lock():
+    """Best-effort release of the RUN lock. Only unlink if we own it
+    (pid matches) so we never delete a peer's fresh lock."""
+    try:
+        if RUN_LOCK_PATH.exists():
+            pid = RUN_LOCK_PATH.read_text(encoding="utf-8").split()[0].strip()
+            if str(os.getpid()) == pid:
+                RUN_LOCK_PATH.unlink()
+    except Exception:
+        pass  # best-effort; stale-steal handles a left lock
+
+
 def atomic_write_json(path, data, indent=1):
     """Atomically replace a JSON file with a PID-unique temp name.
 

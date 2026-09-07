@@ -9,7 +9,7 @@ from pathlib import Path
 # See bluu_ink_constants.py — same dir, auto-resolved on sys.path. Do NOT
 # redefine these here (a divergent hand-copy resurrects parked tasks / steals a
 # live wire lock). 2026-09-06 sweep #4 consolidation.
-from bluu_ink_constants import atomic_write_json, PARKED_MARKERS, LOCK_STALE_SECS
+from bluu_ink_constants import atomic_write_json, PARKED_MARKERS, LOCK_STALE_SECS, acquire_run_lock, release_run_lock
 
 BOTS = Path("C:/Users/bluue/AppData/Local/hermes/bots")
 GALAGE = Path("C:/Users/bluue/Documents/Galage")
@@ -1316,6 +1316,24 @@ def refill_dept(dept, board, cols, count):
 def main():
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"🔧 Dispatcher build {now} — model {MODEL}", flush=True)
+    # SINGLE-INSTANCE RUN LOCK (2026-09-06 sweep #5): the dispatcher cron fires
+    # every 5min but a run can take 30+ min (3 wire steps x 1800s serial). If we
+    # don't guard, a second process starts while the first is alive -> two
+    # dispatchers hammer Ollama (600s call_model timeout tripped) + both
+    # clear_godot_cache/--import the SAME project (GPU/import timeout). Exit
+    # immediately if a live peer holds the run lock; skip this cron tick.
+    if not acquire_run_lock():
+        print("⏭ another dispatcher/build run is in progress — skipping this tick (run.lock held)", flush=True)
+        return
+    try:
+        _main_body()
+    finally:
+        release_run_lock()
+
+
+def _main_body():
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"🔧 Dispatcher build {now} — model {MODEL}", flush=True)
     # AUTO-REFILL: if any department's pending (backlog+ready) is below the
     # minimum, create fresh tasks from the bot_base idea pools so production
     # never runs dry. Without this, once the easy tasks are done the only
@@ -1590,13 +1608,43 @@ def main():
                         continue
                 wire_hook = PROJECTS[dept]["wire_hook"]
                 try:
-                    wr = subprocess.run([VENV_PY, wire_hook, "--dept", dept,
-                                         "--task", task.get("id", ""),
-                                         "--artifact", str(gd),
-                                         "--title", task.get("title", ""),
-                                         "--playtest-gate"],
-                                        capture_output=True, text=True, timeout=1800,
-                                        env={**os.environ, "WIRE_MODEL": WIRE_MODEL})
+                    try:
+                        wr = subprocess.run([VENV_PY, wire_hook, "--dept", dept,
+                                             "--task", task.get("id", ""),
+                                             "--artifact", str(gd),
+                                             "--title", task.get("title", ""),
+                                             "--playtest-gate"],
+                                            capture_output=True, text=True, timeout=1800,
+                                            env={**os.environ, "WIRE_MODEL": WIRE_MODEL})
+                    except subprocess.TimeoutExpired as te:
+                        # Sweep #5 (kimi CRITICAL): the 1800s wire timeout on the
+                        # CHILD process means the child never runs its own
+                        # _drop_wire cleanup — it is SIGKILLed mid-git, leaving the
+                        # repo on a feature branch. Before this fix the exception
+                        # CRASHED the whole tick (no except) AND the stale branch
+                        # leaked to master on the next wire. Clean master + park.
+                        proj = PROJECTS[dept]["project"]
+                        print(f"  ⛔ {dept} {task['id']}: wire TIMEOUT after 1800s — "
+                              f"resetting {proj.name} master clean", flush=True)
+                        try:
+                            subprocess.run(["git", "-C", str(proj),
+                                            "checkout", "-q", "master"], check=False)
+                            subprocess.run(["git", "-C", str(proj),
+                                            "reset", "--hard", "-q"],
+                                           capture_output=True)
+                        except OSError:
+                            pass
+                        task["attempts"] = int(task.get("attempts", 0)) + 1
+                        task["note"] = f"wire failed (timeout 1800s, master reset): {str(te)[:180]}"
+                        if task["attempts"] >= MAX_ATTEMPTS:
+                            task["status"] = "blocked"
+                            task["note"] = "parked: wire step failed " + task["note"]
+                            for c in ("backlog", "ready"):
+                                cols[c] = [t for t in cols.get(c, []) if t.get("id") != task["id"]]
+                            cols.setdefault("blocked", []).append(task)
+                            print(f"  ⛔ {dept} {task['id']}: parked (wire timeout), {task['note']}", flush=True)
+                        save_json(bp, board)
+                        continue
                 finally:
                     if _acquired:
                         try:

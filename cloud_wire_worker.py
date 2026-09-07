@@ -32,7 +32,7 @@ from pathlib import Path
 # truth (bluu_ink_constants.py, same dir). LOCK_STALE_SECS MUST exceed the
 # wire_artifact subprocess timeout (1800s) so a slow-but-alive wire is never
 # stolen and run twice (2026-09-06 sweep #4, ultra Finding 2).
-from bluu_ink_constants import atomic_write_json, LOCK_STALE_SECS
+from bluu_ink_constants import atomic_write_json, LOCK_STALE_SECS, acquire_run_lock, release_run_lock
 
 BOTS = Path("C:/Users/bluue/AppData/Local/hermes/bots")
 GALAGE = Path("C:/Users/bluue/Documents/Galage")
@@ -204,6 +204,23 @@ def post_discord(msg: str):
 
 
 def main():
+    # SINGLE-INSTANCE RUN LOCK (2026-09-06 sweep #5): this cron fires every
+    # 15min but a run can exceed that (up to 3 wire steps x 1800s serial).
+    # Shares run.lock with the dispatcher so only ONE pipeline process is
+    # active at a time -- prevents two processes hammering Ollama (600s
+    # call_model timeout) and/or both running Godot --import on the same
+    # project concurrently (GPU/import timeout). Skip this tick if a peer
+    # (dispatcher or another worker) already holds the lock.
+    if not acquire_run_lock():
+        print("⏭ another pipeline run (dispatcher/worker) is in progress — skipping this tick (run.lock held)", flush=True)
+        return 0
+    try:
+        return _main_body()
+    finally:
+        release_run_lock()
+
+
+def _main_body():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max", type=int, default=2, help="max tasks to wire per run")
     ap.add_argument("--dry-run", action="store_true", help="validate wiring without merging")

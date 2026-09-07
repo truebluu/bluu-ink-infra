@@ -6,6 +6,8 @@ reports a health summary to Discord. Run via cron every hour.
 import json, subprocess, sys, datetime, urllib.request
 from pathlib import Path
 
+from bluu_ink_constants import PARKED_MARKERS
+
 BOTS = Path("C:/Users/bluue/AppData/Local/hermes/bots")
 VENV = "C:/Users/bluue/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe"
 CONFIG = Path("C:/Users/bluue/AppData/Local/bluu-ink/config.json")
@@ -54,10 +56,16 @@ def unblock_parked(board_path):
     if not blocked:
         return 0
     keep, unblock = [], []
+    # Sweep #5: ANY parked marker is the dispatcher's retry-cap/scope-review
+    # park — leave for review. Previously only "parked after ... failed"
+    # (retry-cap) protected the note; "parked: fabricated", "parked: wire
+    # step failed" and "parked: cloud review rejected" were silently
+    # resurrected here -> the exact infinite-retry loop the marker protocol
+    # exists to prevent. Use the shared constants as the single source.
     for t in blocked:
         note = (t.get("note") or "").lower()
-        if "parked after" in note and "failed" in note:
-            keep.append(t)  # dispatcher retry-cap park — leave for review
+        if any(m.lower() in note for m in PARKED_MARKERS):
+            keep.append(t)  # dispatcher park — leave for review
         else:
             unblock.append(t)
     for t in unblock:

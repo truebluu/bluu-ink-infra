@@ -15,6 +15,8 @@ Per tick:
 import json, re, subprocess, sys, datetime, urllib.request
 from pathlib import Path
 
+from bluu_ink_constants import atomic_write_json
+
 BOTS = Path("C:/Users/bluue/AppData/Local/hermes/bots")
 ROADMAP = Path("C:/Users/bluue/AppData/Local/hermes/projects/harmony/next_tranche.md")
 FORWARD = Path("C:/Users/bluue/AppData/Local/hermes/projects/harmony/forward_backlog.md")
@@ -119,15 +121,20 @@ def main():
             cols = b.get("columns", {})
             existing = {t.get("id") for col in cols.values() for t in col}
             existing_titles = {t.get("title", "").lower() for col in cols.values() for t in col}
+            # Sweep #5: use the REAL board-ID prefix (FORGE/SANCT/HARM), NOT
+            # dept.upper() — "sanctuary".upper() is "SANCTUARY-" which never
+            # matches the board's "SANCT-" IDs, so max(nums) was always empty and
+            # every new task got -001 (dedup was by title only -> duplicate IDs).
+            _prefix = {"forge": "FORGE", "sanctuary": "SANCT", "harmony": "HARM"}[dept]
             added = 0
             for t in tasks:
                 if t["title"].lower() in existing_titles:
                     continue
                 # assign next id
                 nums = [int(m.group(1)) for col in cols.values() for t2 in col
-                        for m in [re.match(rf"{dept.upper()}-(\d+)", t2.get("id", ""))] if m]
+                        for m in [re.match(rf"{_prefix}-(\d+)", t2.get("id", ""))] if m]
                 nxt = (max(nums) + 1) if nums else 1
-                tid = f"{dept.upper()}-{nxt:03d}"
+                tid = f"{_prefix}-{nxt:03d}"
                 cols.setdefault("backlog", []).append({
                     "id": tid, "title": t["title"], "status": "backlog",
                     "priority": t["priority"], "description": t["description"],
@@ -135,7 +142,8 @@ def main():
                 })
                 existing_titles.add(t["title"].lower())
                 added += 1
-            save_json(BOTS / dept / "kanban" / "board.json", b)
+            bp = BOTS / dept / "kanban" / "board.json"
+            atomic_write_json(bp, b)
             report.append(f"  {dept}: +{added} new tasks (pending now {s['pending']+added})")
         except Exception as e:
             report.append(f"  {dept}: ERROR {e}")
