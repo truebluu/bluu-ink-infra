@@ -35,7 +35,7 @@ def post_discord(webhook, text):
     payload = {"content": text}
     req = urllib.request.Request(webhook, data=json.dumps(payload).encode(), method="POST")
     req.add_header("Content-Type", "application/json")
-    req.add_header("User-Agent", "Hermes-StallAudit")
+    req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             print("discord:", r.status)

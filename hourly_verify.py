@@ -26,7 +26,7 @@ from pathlib import Path
 
 # Shared park-marker list (single source of truth with dispatcher_singlebuild.py).
 # A divergent hand-copy resurrects parked tasks into an infinite retry loop.
-from bluu_ink_constants import atomic_write_json, PARKED_MARKERS
+from bluu_ink_constants import atomic_write_json, PARKED_MARKERS, acquire_run_lock, release_run_lock
 
 HERMES = Path("C:/Users/bluue/AppData/Local/hermes")
 BOTS_DIR = HERMES / "bots"
@@ -322,7 +322,20 @@ def main():
 
     # 6. AUTO-HEAL (2026-09-03): actively FIX stalls, not just report them.
     # Unblock parked tasks, fire dispatcher on empty boards, restart dead gateway.
-    heal_actions = auto_heal()
+    # Sweep (glm-5.2 C1): auto_heal WRITES boards (unblock_parked -> save_json).
+    # It must honor the SINGLE-INSTANCE run lock, or an hourly_verify firing
+    # mid-dispatcher-run would read-modify-write a stale board and clobber the
+    # dispatcher's in-flight updates (the board-clobber race that caused the
+    # 2-week deadlock). If the lock is held, skip the heal this tick rather
+    # than race — the dispatcher is already running, so healing is redundant.
+    heal_actions = []
+    if acquire_run_lock():
+        try:
+            heal_actions = auto_heal()
+        finally:
+            release_run_lock()
+    else:
+        print("⏭ run lock held by a pipeline process — skipping auto-heal this tick")
     for a in heal_actions:
         ok.append(a)
 

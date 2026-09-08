@@ -130,6 +130,17 @@ def _run():
             for t in tasks:
                 if t["title"].lower() in existing_titles:
                     continue
+                # Sweep (glm-5.2 M2): call_cloud falls back to the model's
+                # `thinking` field when `response` is empty, and parse_tasks
+                # accepts ANY line starting with '-' — so model reasoning
+                # bullets ("- First, we need to consider...") were injected as
+                # task titles. The dispatcher filters these via is_junk_title;
+                # the replenisher must too, or the board fills with thinking
+                # artifacts that the dispatcher then has to archive.
+                _t = t["title"].strip()
+                if (len(_t.split()) > 8
+                        or re.search(r"output exactly|each line|format: TITLE|We need to output|We need to propose|我们只需要|First, we need|Let me|I'll|I will|Here are|Consider", _t, re.I)):
+                    continue
                 # assign next id
                 nums = [int(m.group(1)) for col in cols.values() for t2 in col
                         for m in [re.match(rf"{_prefix}-(\d+)", t2.get("id", ""))] if m]

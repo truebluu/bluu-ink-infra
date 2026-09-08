@@ -1561,6 +1561,16 @@ def main():
         return
     try:
         _main_body()
+    except subprocess.TimeoutExpired as te:
+        # Sweep (glm-5.2 M1): validate_godot/validate_script/validate_integration
+        # run Godot subprocesses with timeout=120/180, none caught. If one hangs,
+        # TimeoutExpired used to propagate uncaught -> the whole tick crashed.
+        # The run lock still released (finally), but the board was NOT saved and
+        # the task's attempts were NOT incremented, so the anti-thrash cap
+        # (MAX_ATTEMPTS=3) never fired -> the same task retried forever if Godot
+        # consistently hung. Catch it so the tick degrades gracefully instead of
+        # crashing; the next tick retries with a fresh board read.
+        print(f"⛔ dispatcher tick aborted: Godot subprocess timed out ({str(te)[:180]})", flush=True)
     finally:
         release_run_lock()
 

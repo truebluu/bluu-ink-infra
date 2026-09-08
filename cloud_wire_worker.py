@@ -169,7 +169,18 @@ def run_wire(task, dry_run, project, dept):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, env=env)
     except subprocess.TimeoutExpired:
-        print(f"  ✗ {task['id']}: wire timed out (1800s)", flush=True)
+        # Sweep (glm-5.2 H2): the 1800s wire timeout SIGKILLs the wire_artifact
+        # child mid-git, so it never runs its own _drop_wire cleanup — the repo
+        # is left on a wire/<task> feature branch. The dispatcher's inline wire
+        # already resets master clean on timeout (dispatcher_singlebuild.py
+        # ~1863); the cloud worker must do the same or the next wire for ANY
+        # task in this project fails (checkout -b runs while not on master).
+        print(f"  ✗ {task['id']}: wire timed out (1800s) — resetting {project.name} master clean", flush=True)
+        try:
+            subprocess.run(["git", "-C", str(project), "checkout", "-q", "master"], check=False)
+            subprocess.run(["git", "-C", str(project), "reset", "--hard", "-q"], capture_output=True)
+        except OSError:
+            pass
         return 2, None
     out = (r.stdout or "") + (r.stderr or "")
     # extract feature id from the success line "WIRED + MERGED Fxx"

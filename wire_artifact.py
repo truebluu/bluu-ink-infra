@@ -873,7 +873,17 @@ def main():
         if rc.returncode != 0:
             return _drop_wire(project, br, args, base, f"commit failed ({rc.stderr.strip()})")
         # Validate the COMMITTED state (what actually ships).
-        ok, err = validate_game(project, cfg)
+        # Sweep (glm-5.2 H1): validate_game runs 4 Godot subprocesses with
+        # timeout=180, none caught. If one hangs, TimeoutExpired propagates
+        # through main() uncaught -> process crashes -> _drop_wire never runs ->
+        # repo left on the wire/<task> feature branch, and the next wire for
+        # ANY task in that project fails (checkout -b runs while not on master).
+        # Catch it here and drop the branch atomically, same as any other reject.
+        try:
+            ok, err = validate_game(project, cfg)
+        except subprocess.TimeoutExpired as te:
+            return _drop_wire(project, br, args, base,
+                              f"validate_game timed out (Godot subprocess >180s): {str(te)[:180]}")
 
     if not ok:
         # Revert ALL tracked wire edits (committed or not) back to the pre-wire
