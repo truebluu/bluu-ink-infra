@@ -57,18 +57,26 @@ def check():
     used_gb = gpu["used_mib"] / 1024
     alerts = []
     level = "OK"
+    # Severity rank map — max() on strings is LEXICOGRAPHIC, and "WARN" > "CRITICAL"
+    # (W=0x57 > C=0x43), so a CRITICAL would be silently downgraded to WARN by
+    # max(level, "WARN"). Compare by numeric rank instead.
+    _SEV = {"OK": 0, "WARN": 1, "CRITICAL": 2}
+    def _raise(sev: str) -> None:
+        nonlocal level
+        if _SEV[sev] > _SEV[level]:
+            level = sev
     if free_gb < 1.0:
-        alerts.append(f"CRITICAL VRAM: {free_gb:.1f}GB free"); level = "CRITICAL"
+        alerts.append(f"CRITICAL VRAM: {free_gb:.1f}GB free"); _raise("CRITICAL")
     elif free_gb < 2.0:
-        alerts.append(f"LOW VRAM: {free_gb:.1f}GB free"); level = max(level, "WARN")
+        alerts.append(f"LOW VRAM: {free_gb:.1f}GB free"); _raise("WARN")
     if gpu["temp"] >= 88:
-        alerts.append(f"CRITICAL TEMP: {gpu['temp']}C"); level = "CRITICAL"
+        alerts.append(f"CRITICAL TEMP: {gpu['temp']}C"); _raise("CRITICAL")
     elif gpu["temp"] >= 80:
-        alerts.append(f"HIGH TEMP: {gpu['temp']}C"); level = max(level, "WARN")
+        alerts.append(f"HIGH TEMP: {gpu['temp']}C"); _raise("WARN")
     if gpu["util"] >= 95:
-        alerts.append(f"HIGH GPU UTIL: {gpu['util']}%"); level = max(level, "WARN")
+        alerts.append(f"HIGH GPU UTIL: {gpu['util']}%"); _raise("WARN")
     if gpu["power"] > 550:
-        alerts.append(f"HIGH POWER: {gpu['power']:.0f}W"); level = max(level, "WARN")
+        alerts.append(f"HIGH POWER: {gpu['power']:.0f}W"); _raise("WARN")
     rec = {"ts": datetime.now().isoformat(), "level": level, "vram_free_gb": round(free_gb,1),
            "vram_used_gb": round(used_gb,1), "util": gpu["util"], "temp": gpu["temp"],
            "power": gpu["power"], "alerts": alerts}
